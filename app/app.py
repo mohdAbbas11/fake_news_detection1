@@ -147,13 +147,21 @@ def load_models():
     models = {}
     vectorizers = {}
     
-    # Try to load the best model name
+    # Try to load the best model name (original and combined)
     best_model_path = os.path.join(MODELS_DIR, 'best_model.txt')
+    best_model_combined_path = os.path.join(MODELS_DIR, 'best_model_combined.txt')
     best_model_name = None
+    best_model_combined_name = None
     
     if os.path.exists(best_model_path):
         with open(best_model_path, 'r') as f:
             best_model_name = f.read().strip()
+            
+    if os.path.exists(best_model_combined_path):
+        with open(best_model_combined_path, 'r') as f:
+            best_model_combined_name = f.read().strip()
+            # Append "Combined" to distinguish from original models
+            best_model_combined_name = f"{best_model_combined_name} Combined"
     
     # Load traditional ML models
     model_files = [
@@ -163,12 +171,37 @@ def load_models():
         ('svm_model.pkl', 'Support Vector Machine')
     ]
     
-    for file_name, model_name in model_files:
+    # Add combined models
+    combined_model_files = [
+        ('naive_bayes_model_combined.pkl', 'Naive Bayes Combined'),
+        ('logistic_regression_model_combined.pkl', 'Logistic Regression Combined'),
+        ('random_forest_model_combined.pkl', 'Random Forest Combined'),
+        ('support_vector_machine_model_combined.pkl', 'Support Vector Machine Combined')
+    ]
+    
+    # Load all models (original and combined)
+    all_model_files = model_files + combined_model_files
+    
+    for file_name, model_name in all_model_files:
         model_path = os.path.join(MODELS_DIR, file_name)
         if os.path.exists(model_path):
             try:
                 with open(model_path, 'rb') as f:
-                    model, vectorizer = pickle.load(f)
+                    # For combined models, the pickle file contains just the model
+                    if "_combined" in file_name:
+                        model = pickle.load(f)
+                        # Load the combined vectorizer separately
+                        vectorizer_path = os.path.join(MODELS_DIR, 'tfidf_vectorizer_combined.pkl')
+                        if os.path.exists(vectorizer_path):
+                            with open(vectorizer_path, 'rb') as vf:
+                                vectorizer = pickle.load(vf)
+                        else:
+                            st.warning(f"Combined vectorizer not found at {vectorizer_path}")
+                            continue
+                    else:
+                        # Original models have model and vectorizer in the same pickle file
+                        model, vectorizer = pickle.load(f)
+                    
                 models[model_name] = model
                 vectorizers[model_name] = vectorizer
             except Exception as e:
@@ -201,7 +234,7 @@ def load_models():
         except Exception as e:
             st.error(f"Error loading BERT model: {e}")
     
-    return models, vectorizers, best_model_name
+    return models, vectorizers, best_model_name, best_model_combined_name
 
 # Make predictions
 def predict_fake_news(text, model_name, models, vectorizers):
@@ -291,8 +324,12 @@ def load_feature_importance():
 
 # Load model comparison if available
 @st.cache_data
-def load_model_comparison():
-    model_comparison_path = os.path.join(PROCESSED_DATA_DIR, 'model_comparison.csv')
+def load_model_comparison(combined=False):
+    if combined:
+        model_comparison_path = os.path.join(PROCESSED_DATA_DIR, 'model_comparison_combined.csv')
+    else:
+        model_comparison_path = os.path.join(PROCESSED_DATA_DIR, 'model_comparison.csv')
+        
     if os.path.exists(model_comparison_path):
         return pd.read_csv(model_comparison_path)
     return None
@@ -300,14 +337,20 @@ def load_model_comparison():
 # Main function
 def main():
     # Load models
-    models, vectorizers, best_model_name = load_models()
+    models, vectorizers, best_model_name, best_model_combined_name = load_models()
     
-    # Set default model
-    default_model = best_model_name if best_model_name else next(iter(models.keys())) if models else None
+    # Set default model (prioritize combined model if available)
+    default_model = best_model_combined_name if best_model_combined_name else best_model_name
+    if not default_model and models:
+        default_model = next(iter(models.keys()))
     
     # Sidebar
     st.sidebar.title("Fake News Detector")
     st.sidebar.image("https://img.icons8.com/color/96/000000/detective.png", width=100)
+    
+    # Show which dataset the models are trained on
+    if any("Combined" in model_name for model_name in models.keys()):
+        st.sidebar.success("✅ Combined dataset models available")
     
     # Navigation
     page = st.sidebar.radio("Navigation", ["Home", "Detect Fake News", "Model Performance", "About"])
@@ -480,62 +523,132 @@ def main():
     elif page == "Model Performance":
         st.title("Model Performance")
         
-        # Load model comparison data
-        model_comparison = load_model_comparison()
+        # Create tabs for original and combined models
+        tabs = st.tabs(["Original Models", "Combined Models"])
         
-        if model_comparison is not None:
-            st.markdown("### Model Comparison")
+        # Tab for original models
+        with tabs[0]:
+            # Load original model comparison data
+            model_comparison = load_model_comparison(combined=False)
             
-            # Display metrics table
-            st.dataframe(model_comparison[['model_name', 'accuracy', 'precision', 'recall', 'f1', 'roc_auc']])
+            if model_comparison is not None:
+                st.markdown("### Original Model Comparison")
+                st.info("These models were trained on the original dataset.")
+                
+                # Display metrics table
+                st.dataframe(model_comparison[['model_name', 'accuracy', 'precision', 'recall', 'f1', 'roc_auc']])
+                
+                # Plot metrics comparison
+                st.markdown("#### Metrics Comparison")
+                
+                # Melt the dataframe for easier plotting
+                plot_df = pd.melt(
+                    model_comparison, 
+                    id_vars=['model_name'], 
+                    value_vars=['accuracy', 'precision', 'recall', 'f1', 'roc_auc'],
+                    var_name='metric',
+                    value_name='score'
+                )
+                
+                # Create plot
+                fig, ax = plt.subplots(figsize=(12, 6))
+                sns.barplot(x='metric', y='score', hue='model_name', data=plot_df)
+                plt.title('Original Model Performance Comparison')
+                plt.xlabel('Metric')
+                plt.ylabel('Score')
+                plt.ylim(0, 1)
+                plt.legend(title='Model')
+                plt.tight_layout()
+                st.pyplot(fig)
+                
+                # Display best model
+                best_model_idx = model_comparison['f1'].idxmax()
+                best_model = model_comparison.loc[best_model_idx, 'model_name']
+                
+                st.markdown(f"### Best Original Model: {best_model}")
+                st.markdown("Performance metrics:")
+                
+                # Create metrics display
+                col1, col2, col3, col4, col5 = st.columns(5)
+                
+                with col1:
+                    st.metric("Accuracy", f"{model_comparison.loc[best_model_idx, 'accuracy']:.4f}")
+                
+                with col2:
+                    st.metric("Precision", f"{model_comparison.loc[best_model_idx, 'precision']:.4f}")
+                
+                with col3:
+                    st.metric("Recall", f"{model_comparison.loc[best_model_idx, 'recall']:.4f}")
+                
+                with col4:
+                    st.metric("F1 Score", f"{model_comparison.loc[best_model_idx, 'f1']:.4f}")
+                
+                with col5:
+                    st.metric("ROC AUC", f"{model_comparison.loc[best_model_idx, 'roc_auc']:.4f}")
+            else:
+                st.info("Original model comparison data not available.")
+        
+        # Tab for combined models
+        with tabs[1]:
+            # Load combined model comparison data
+            model_comparison_combined = load_model_comparison(combined=True)
             
-            # Plot metrics comparison
-            st.markdown("#### Metrics Comparison")
-            
-            # Melt the dataframe for easier plotting
-            plot_df = pd.melt(
-                model_comparison, 
-                id_vars=['model_name'], 
-                value_vars=['accuracy', 'precision', 'recall', 'f1', 'roc_auc'],
-                var_name='metric',
-                value_name='score'
-            )
-            
-            # Create plot
-            fig, ax = plt.subplots(figsize=(12, 6))
-            sns.barplot(x='metric', y='score', hue='model_name', data=plot_df)
-            plt.title('Model Performance Comparison')
-            plt.xlabel('Metric')
-            plt.ylabel('Score')
-            plt.ylim(0, 1)
-            plt.legend(title='Model')
-            plt.tight_layout()
-            st.pyplot(fig)
-            
-            # Display best model
-            best_model_idx = model_comparison['f1'].idxmax()
-            best_model = model_comparison.loc[best_model_idx, 'model_name']
-            
-            st.markdown(f"### Best Model: {best_model}")
-            st.markdown("Performance metrics:")
-            
-            # Create metrics display
-            col1, col2, col3, col4, col5 = st.columns(5)
-            
-            with col1:
-                st.metric("Accuracy", f"{model_comparison.loc[best_model_idx, 'accuracy']:.4f}")
-            
-            with col2:
-                st.metric("Precision", f"{model_comparison.loc[best_model_idx, 'precision']:.4f}")
-            
-            with col3:
-                st.metric("Recall", f"{model_comparison.loc[best_model_idx, 'recall']:.4f}")
-            
-            with col4:
-                st.metric("F1 Score", f"{model_comparison.loc[best_model_idx, 'f1']:.4f}")
-            
-            with col5:
-                st.metric("ROC AUC", f"{model_comparison.loc[best_model_idx, 'roc_auc']:.4f}")
+            if model_comparison_combined is not None:
+                st.markdown("### Combined Model Comparison")
+                st.success("These models were trained on the combined dataset (fake.csv + true.csv).")
+                
+                # Display metrics table
+                st.dataframe(model_comparison_combined[['model_name', 'accuracy', 'precision', 'recall', 'f1', 'roc_auc']])
+                
+                # Plot metrics comparison
+                st.markdown("#### Metrics Comparison")
+                
+                # Melt the dataframe for easier plotting
+                plot_df = pd.melt(
+                    model_comparison_combined, 
+                    id_vars=['model_name'], 
+                    value_vars=['accuracy', 'precision', 'recall', 'f1', 'roc_auc'],
+                    var_name='metric',
+                    value_name='score'
+                )
+                
+                # Create plot
+                fig, ax = plt.subplots(figsize=(12, 6))
+                sns.barplot(x='metric', y='score', hue='model_name', data=plot_df)
+                plt.title('Combined Model Performance Comparison')
+                plt.xlabel('Metric')
+                plt.ylabel('Score')
+                plt.ylim(0, 1)
+                plt.legend(title='Model')
+                plt.tight_layout()
+                st.pyplot(fig)
+                
+                # Display best model
+                best_model_idx = model_comparison_combined['f1'].idxmax()
+                best_model = model_comparison_combined.loc[best_model_idx, 'model_name']
+                
+                st.markdown(f"### Best Combined Model: {best_model}")
+                st.markdown("Performance metrics:")
+                
+                # Create metrics display
+                col1, col2, col3, col4, col5 = st.columns(5)
+                
+                with col1:
+                    st.metric("Accuracy", f"{model_comparison_combined.loc[best_model_idx, 'accuracy']:.4f}")
+                
+                with col2:
+                    st.metric("Precision", f"{model_comparison_combined.loc[best_model_idx, 'precision']:.4f}")
+                
+                with col3:
+                    st.metric("Recall", f"{model_comparison_combined.loc[best_model_idx, 'recall']:.4f}")
+                
+                with col4:
+                    st.metric("F1 Score", f"{model_comparison_combined.loc[best_model_idx, 'f1']:.4f}")
+                
+                with col5:
+                    st.metric("ROC AUC", f"{model_comparison_combined.loc[best_model_idx, 'roc_auc']:.4f}")
+            else:
+                st.info("Combined model comparison data not available.")
             
             # Feature importance for Logistic Regression
             feature_importance = load_feature_importance()
@@ -563,7 +676,7 @@ def main():
                 
                 plt.tight_layout()
                 st.pyplot(fig)
-        else:
+        if model_comparison is None:
             st.info("Model comparison data not available. Please train models first.")
     
     elif page == "About":
@@ -576,9 +689,16 @@ def main():
         It uses Natural Language Processing (NLP) and Machine Learning techniques to analyze news content and 
         classify it as either real or fake based on its linguistic patterns and content features.
         
+        ### Datasets
+        
+        The system offers two sets of models:
+        
+        1. **Original Models**: Trained on the original fake news dataset.
+        2. **Combined Models**: Trained on a combined dataset from `fake.csv` and `true.csv` files, offering improved accuracy and robustness.
+        
         ### Methodology
         
-        1. **Data Collection**: The system is trained on a dataset of labeled news articles from Indian sources.
+        1. **Data Collection**: The system is trained on datasets of labeled news articles from Indian sources.
         
 
         2. **Text Preprocessing**: News articles are cleaned and preprocessed using techniques such as:
